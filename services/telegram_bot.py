@@ -1,81 +1,56 @@
 from telegram import Update, ParseMode
-from telegram.ext import Updater, CommandHandler, CallbackContext
+from telegram.ext import Application, CommandHandler, ContextTypes
 from config.settings import Config
 from database.db_handler import Database
 from services.api_client import APIClient
-from utilities.security import restricted, rate_limit
 
 db = Database()
 api = APIClient()
 
 class TelegramBot:
     def __init__(self):
-        self.updater = Updater(token=Config.TELEGRAM_TOKEN, use_context=True)
+        self.db = db
+        self.api = api
+        self.app = Application.builder().token(Config.TELEGRAM_TOKEN).build()
         self._register_handlers()
 
     def _register_handlers(self):
         handlers = [
             CommandHandler('start', self.start),
             CommandHandler('cve', self.cve),
-            CommandHandler('exploit', self.exploit),
-            CommandHandler('search', self.search),
-            CommandHandler('code', self.code_sample)
         ]
         
         for handler in handlers:
-            self.updater.dispatcher.add_handler(handler)
+            self.app.add_handler(handler)
 
-    @restricted
-    @rate_limit
-    def start(self, update: Update, context: CallbackContext):
+    async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = """
-🔒 *CyberSecurity Bot* 🔒
+🔒 Welcome to CyberSecurity Bot!
 Available commands:
-- /cve [count] - Latest CVEs
-- /exploit [tool] - Exploit techniques
-- /search [query] - Search security tips
-- /code [tool] - Get code samples
+/cve [count] - Latest CVEs
         """
-        update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+        await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
-    @restricted
-    @rate_limit
-    def cve(self, update: Update, context: CallbackContext):
+    async def cve(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         count = int(context.args[0]) if context.args else 5
-        data = api.fetch_cve()
+        data = self.api.fetch_cve(count)
         
         if data:
-            items = data["result"]["CVE_Items"][:count]
             formatted = "\n\n".join([
                 f"🔺 *{item['cve']['CVE_data_meta']['ID']}*\n"
-                f"Severity: {self._get_severity(item)}\n"
+                f"Severity: {item['impact']['baseMetricV3']['cvssV3']['baseSeverity']}\n"
                 f"{item['cve']['description']['description_data'][0]['value'][:200]}"
-                for item in items
+                for item in data["result"]["CVE_Items"][:count]
             ])
-            update.message.reply_text(formatted, parse_mode=ParseMode.MARKDOWN)
-            
-            # Store in database
-            with db.cursor() as c:
-                for item in items:
-                    c.execute('''
-                        INSERT INTO security_data 
-                        (source, category, title, description, severity)
-                        VALUES (?, ?, ?, ?, ?)
-                    ''', (
-                        'nvd',
-                        'cve',
-                        item['cve']['CVE_data_meta']['ID'],
-                        item['cve']['description']['description_data'][0]['value'],
-                        self._get_severity(item)
-                    ))
-                db.conn.commit()
+            await update.message.reply_text(formatted, parse_mode=ParseMode.MARKDOWN)
 
-    def _get_severity(self, item):
-        try:
-            return item['impact']['baseMetricV3']['cvssV3']['baseSeverity']
-        except KeyError:
-            return "N/A"
+    async def run(self):
+        await self.app.initialize()
+        await self.app.start()
+        await self.app.updater.start_polling()
 
-    def run(self):
-        self.updater.start_polling()
-        self.updater.idle()
+    async def shutdown(self):
+        if self.app.updater.running:
+            await self.app.updater.stop()
+        await self.app.stop()
+        await self.app.shutdown()
